@@ -1,1 +1,2 @@
 pyinstaller>=6.0
+pysyncobj>=0.3.15

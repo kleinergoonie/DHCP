@@ -1,4 +1,21 @@
-"""Core DHCP server – listens on UDP port 67 and handles client messages."""
+"""Core DHCP server – listens on UDP port 67 and handles client messages.
+
+When Raft mode is enabled (``raft_enabled: true`` in config), the server
+uses a :class:`~src.raft.lease_manager.RaftLeaseManager` instead of the
+default in-memory :class:`~src.lease_manager.LeaseManager`.  In that mode:
+
+* Only the **Raft leader** responds to DHCPDISCOVER and DHCPREQUEST for new
+  allocations.  Follower nodes silently drop DISCOVER and NAK new REQUESTs.
+* When ``raft_allow_follower_renewals`` is ``true``, followers may also
+  serve DHCPREQUEST renewals for leases that already exist in their local
+  state.  This improves renewal availability at the cost of potentially
+  serving a slightly stale lease expiry time during leader-less intervals.
+* DHCPRELEASE and DHCPINFORM are always handled locally (INFORM never
+  modifies state; RELEASE is forwarded to the Raft log by any node).
+
+Single-node / legacy mode (``raft_enabled: false``, the default) is
+completely unchanged and requires no external dependencies.
+"""
 
 import ipaddress
 import logging
@@ -22,6 +39,44 @@ SERVER_PORT = 67
 CLIENT_PORT = 68
 
 logger = logging.getLogger(__name__)
+
+
+def _build_lease_manager(
+    config: dict,
+    on_leases_changed: Callable | None,
+):
+    """Return the appropriate lease manager based on config.
+
+    If ``raft_enabled`` is truthy in *config*, a
+    :class:`~src.raft.lease_manager.RaftLeaseManager` is returned.
+    Otherwise the standard in-memory :class:`~src.lease_manager.LeaseManager`
+    is returned (backward-compatible default).
+    """
+    if config.get('raft_enabled'):
+        from .raft.config import RaftConfig
+        from .raft.lease_manager import RaftLeaseManager
+
+        raft_cfg = RaftConfig.from_dict(config)
+        logger.info(
+            'Raft mode enabled – node=%s  bind=%s  peers=%s',
+            raft_cfg.node_id or '(auto)',
+            raft_cfg.bind_address,
+            raft_cfg.peers,
+        )
+        return RaftLeaseManager(
+            pool_start=config['pool_start'],
+            pool_end=config['pool_end'],
+            lease_time=int(config['lease_time']),
+            raft_cfg=raft_cfg,
+            on_change=on_leases_changed,
+        )
+
+    return LeaseManager(
+        pool_start=config['pool_start'],
+        pool_end=config['pool_end'],
+        lease_time=int(config['lease_time']),
+        on_change=on_leases_changed,
+    )
 
 
 class DHCPServer:
@@ -51,12 +106,7 @@ class DHCPServer:
         self._thread: threading.Thread | None = None
         self._purge_thread: threading.Thread | None = None
 
-        self.lease_manager = LeaseManager(
-            pool_start  = config['pool_start'],
-            pool_end    = config['pool_end'],
-            lease_time  = int(config['lease_time']),
-            on_change   = on_leases_changed,
-        )
+        self.lease_manager = _build_lease_manager(config, on_leases_changed)
 
     # ------------------------------------------------------------------
     # Public API
@@ -80,6 +130,12 @@ class DHCPServer:
             except OSError:
                 pass
             self._sock = None
+        # Gracefully shutdown the Raft engine if present
+        if hasattr(self.lease_manager, 'stop'):
+            try:
+                self.lease_manager.stop()
+            except Exception:
+                pass
         self._log('DHCP-Server gestoppt.')
 
     def update_config(self, config: dict) -> None:
@@ -127,6 +183,27 @@ class DHCPServer:
     # Packet dispatch
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Raft leader-check helpers
+    # ------------------------------------------------------------------
+
+    def _raft_enabled(self) -> bool:
+        return bool(self.config.get('raft_enabled'))
+
+    def _is_raft_leader(self) -> bool:
+        """Return True when Raft is either disabled (single-node) or this
+        node is the current leader."""
+        if not self._raft_enabled():
+            return True
+        return getattr(self.lease_manager, 'is_leader', True)
+
+    def _allow_follower_renewals(self) -> bool:
+        return bool(self.config.get('raft_allow_follower_renewals', False))
+
+    # ------------------------------------------------------------------
+    # Packet dispatch
+    # ------------------------------------------------------------------
+
     def _handle(self, pkt: DHCPPacket, addr: tuple) -> None:
         msg_type = pkt.get_message_type()
         if msg_type is None:
@@ -153,6 +230,11 @@ class DHCPServer:
     # ------------------------------------------------------------------
 
     def _handle_discover(self, pkt: DHCPPacket) -> None:
+        # In Raft mode only the leader sends offers for new allocations
+        if not self._is_raft_leader():
+            self._log(f'DISCOVER von {pkt.get_mac()} ignoriert – kein Leader.')
+            return
+
         mac          = pkt.get_mac()
         requested_ip = pkt.get_requested_ip()
         offered_ip   = self.lease_manager.offer_ip(mac, requested_ip)
@@ -176,6 +258,26 @@ class DHCPServer:
 
         requested_ip = pkt.get_requested_ip() or pkt.ciaddr
         hostname     = pkt.get_hostname()
+
+        # ---------- Raft: follower handling ----------
+        if self._raft_enabled() and not self._is_raft_leader():
+            if self._allow_follower_renewals():
+                # Followers may serve renewals for already-known leases.
+                existing = self.lease_manager.get_lease(mac)
+                if existing and not existing.is_expired:
+                    reply = self._build_reply(pkt, DHCPACK, existing.ip)
+                    self._send(reply, pkt)
+                    self._log(
+                        f'ACK (Follower-Renewal) {existing.ip} → {mac}'
+                    )
+                    return
+            # Cannot serve; send NAK so client retries with another server.
+            reply = self._build_nak(pkt)
+            self._send(reply, pkt)
+            self._log(f'NAK (kein Leader) → {mac}')
+            return
+        # ---------- Normal / leader path ----------
+
         assigned_ip  = self.lease_manager.assign_ip(mac, hostname, requested_ip or None)
 
         if not assigned_ip:
