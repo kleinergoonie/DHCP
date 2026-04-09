@@ -1,0 +1,66 @@
+version: "3.9"
+
+# 3-node DHCP cluster with Raft consensus.
+#
+# Start the cluster:
+#   docker-compose up -d
+#
+# Watch logs:
+#   docker-compose logs -f
+#
+# Stop and clean up:
+#   docker-compose down -v
+#
+# Each node exposes:
+#   - UDP 67   – DHCP (only the leader responds)
+#   - TCP 9090 – Prometheus metrics + health endpoint
+#
+# Prometheus scrape config (snippet):
+#   scrape_configs:
+#     - job_name: dhcp
+#       static_configs:
+#         - targets: ['dhcp1:9090', 'dhcp2:9090', 'dhcp3:9090']
+
+x-dhcp-common: &dhcp-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  restart: unless-stopped
+  network_mode: host          # required for UDP broadcast on the same segment
+  cap_add:
+    - NET_BIND_SERVICE         # bind port 67 as non-root
+  environment:
+    PYTHONUNBUFFERED: "1"
+
+services:
+  dhcp1:
+    <<: *dhcp-common
+    container_name: dhcp1
+    volumes:
+      - dhcp1_data:/data
+      - ./node1.json:/app/config.json:ro
+    ports:
+      - "9091:9090"
+
+  dhcp2:
+    <<: *dhcp-common
+    container_name: dhcp2
+    volumes:
+      - dhcp2_data:/data
+      - ./node2.json:/app/config.json:ro
+    ports:
+      - "9092:9090"
+
+  dhcp3:
+    <<: *dhcp-common
+    container_name: dhcp3
+    volumes:
+      - dhcp3_data:/data
+      - ./node3.json:/app/config.json:ro
+    ports:
+      - "9093:9090"
+
+volumes:
+  dhcp1_data:
+  dhcp2_data:
+  dhcp3_data:

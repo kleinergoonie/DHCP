@@ -6,5 +6,22 @@
   "router":      "192.168.1.1",
   "dns_servers": "8.8.8.8, 8.8.4.4",
   "lease_time":  86400,
-  "bind_ip":     ""
+  "bind_ip":     "",
+
+  "raft_enabled":                 false,
+  "raft_node_id":                 "",
+  "raft_bind_address":            "0.0.0.0:4321",
+  "raft_peers":                   [],
+  "raft_data_dir":                "./raft_data",
+  "raft_heartbeat_period":        0.1,
+  "raft_min_election_timeout":    0.5,
+  "raft_max_election_timeout":    1.4,
+  "raft_snapshot_min_entries":    5000,
+  "raft_snapshot_min_time":       300,
+  "raft_password":                "",
+  "raft_allow_follower_renewals": false,
+  "raft_commands_wait_leader":    true,
+  "raft_metrics_port":            9090,
+  "raft_dynamic_membership":      false,
+  "raft_sync_timeout":            5.0
 }
