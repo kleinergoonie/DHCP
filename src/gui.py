@@ -4,6 +4,7 @@ import ipaddress
 import json
 import os
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -305,7 +306,7 @@ class DHCPApp(tk.Tk):
 
         if self._server:
             self._server.update_config(cfg)
-            self._append_log('[System] Konfiguration übernommen.', 'info')
+            self._append_log('[System] Konfiguration übernommen.')
 
         messagebox.showinfo('Gespeichert', 'Konfiguration erfolgreich gespeichert.')
 
@@ -349,9 +350,8 @@ class DHCPApp(tk.Tk):
         self._tree.delete(*self._tree.get_children())
         for i, lease in enumerate(leases):
             tag = 'odd' if i % 2 else 'even'
-            import time as _time
-            at = _time.strftime('%d.%m.%Y %H:%M:%S',
-                                _time.localtime(lease.assigned_at))
+            at = time.strftime('%d.%m.%Y %H:%M:%S',
+                               time.localtime(lease.assigned_at))
             self._tree.insert('', 'end', iid=lease.mac, tags=(tag,), values=(
                 lease.ip, lease.mac, lease.hostname or '–', at, lease.ttl_str,
             ))
@@ -366,14 +366,14 @@ class DHCPApp(tk.Tk):
             return
         for mac in sel:
             self._server.lease_manager.release_ip(mac)
-            self._append_log(f'[System] Lease freigegeben: {mac}', 'rel')
+            self._append_log(f'[System] Lease freigegeben: {mac}')
         self._refresh_lease_table()
 
     # ------------------------------------------------------------------
     # Logging
     # ------------------------------------------------------------------
 
-    def _append_log(self, msg: str, tag: str = 'info') -> None:
+    def _append_log(self, msg: str) -> None:
         tag = self._auto_tag(msg)
         self._log_text.configure(state='normal')
         self._log_text.insert('end', msg + '\n', tag)
